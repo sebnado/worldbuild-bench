@@ -1,0 +1,38 @@
+{
+  "name": "worldbuild-bench",
+  "version": "0.1.0",
+  "description": "A benchmark for spatial, temporal, and interactive reasoning in AI-generated 3D games",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "wb": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "prompts",
+    "skills",
+    "tasks",
+    "scaffold",
+    "scripts",
+    "models.json",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "tsx --test test/*.test.ts",
+    "fetch-three": "bash scripts/fetch-three.sh",
+    "wb": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

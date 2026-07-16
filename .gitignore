@@ -1,0 +1,13 @@
+node_modules/
+dist/
+runs/
+scaffold/lib/
+.env
+.env.local
+*.log
+
+# Local scratch — superseded runs, unrelated third-party clones, private pipeline notes
+old/
+pi/
+TECHNICAL_DEBT.md
+REPORT.md

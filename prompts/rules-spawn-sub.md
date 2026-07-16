@@ -1,0 +1,1 @@
+- You may delegate independent, well-scoped pieces of work to subagents with spawn_agent. Issue several spawn_agent calls in a single reply to run them in parallel.

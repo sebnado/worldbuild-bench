@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Game</title>
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #111; }
+    canvas { display: block; }
+  </style>
+  <!--
+    Import map for the bundled libraries (populated by scripts/fetch-three.sh).
+    Use these exact specifiers in ES module imports:
+      import * as THREE from 'three';
+      import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+      import RAPIER from '@dimforge/rapier3d-compat';   // optional physics engine
+    Do NOT load libraries from a CDN or add <script src> tags for them.
+    (The cdn.skypack.dev entry only remaps the URL hardcoded inside
+    lib/three/examples/jsm/physics/RapierPhysics.js to the local bundle.)
+  -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "./lib/three/build/three.module.min.js",
+      "three/examples/jsm/": "./lib/three/examples/jsm/",
+      "@dimforge/rapier3d-compat": "./lib/rapier/rapier.mjs",
+      "https://cdn.skypack.dev/@dimforge/rapier3d-compat@0.17.3": "./lib/rapier/rapier.mjs"
+    }
+  }
+  </script>
+</head>
+<body>
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>
