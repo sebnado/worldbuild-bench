@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
 import path from "node:path";
-import { runBench, listTasks, readTaskBrief, gateResultToJson } from "./bench/run.js";
+import { runBench, resumeBench, listTasks, readTaskBrief, gateResultToJson } from "./bench/run.js";
 import { runGates } from "./bench/gates.js";
 import { writeRound, modelRows } from "./bench/report.js";
 import { packageRoot } from "./util/paths.js";
@@ -53,6 +53,18 @@ Commands:
                                    (default: provider default)
       [--quiet]                    Suppress per-turn console output
 
+  resume <run-dir>                 Continue a run after budget exhaustion,
+                                   interruption, or a provider/process crash
+                                   after its first tool-call response. Reuses
+                                   the workspace and conversation. Each cap
+                                   defaults to the previous segment's cap;
+                                   result.json totals remain cumulative.
+      [--budget-usd <n>]           Fresh cost window for this segment
+      [--budget-mins <n>]          Fresh wall-clock window for this segment
+      [--max-turns <n>] [--max-tokens <n>] [--effort <tier>] [--quiet]
+                                   Registry entries may map effort tiers
+                                   (Kimi K3: every tier maps to native "max")
+
   gate <dir> [--page <file>]       Score an existing game directory (or a
                                    runs/<id> directory containing workspace/).
                                    Prints the gate checklist and both scores.
@@ -75,6 +87,7 @@ Environment:
 
 Examples:
   wb run --task racing --model claude-sonnet-5 --budget-usd 5 --budget-mins 20
+  wb resume runs/20260703-120000-racing-claude-sonnet-5 --budget-usd 5
   wb gate runs/20260703-120000-racing-claude-sonnet-5
   wb report --round july-2026
 `;
@@ -142,6 +155,24 @@ async function cmdRun(p: Parsed): Promise<void> {
   await runBench({
     task: requireStr(p.flags, "task"),
     model: requireStr(p.flags, "model"),
+    maxUsd: optNum(p.flags, "budget-usd"),
+    maxWallMins: optNum(p.flags, "budget-mins"),
+    maxTurns: optNum(p.flags, "max-turns"),
+    maxTokens: optNum(p.flags, "max-tokens"),
+    effort: effort as "low" | "medium" | "high" | "xhigh" | undefined,
+    quiet: p.flags.quiet === true,
+  });
+}
+
+async function cmdResume(p: Parsed): Promise<void> {
+  const runDir = p.positional[0];
+  if (!runDir) throw new Error("usage: wb resume <run-dir> (a runs/<id> directory)");
+  const effort = typeof p.flags.effort === "string" ? p.flags.effort : undefined;
+  if (effort && !["low", "medium", "high", "xhigh"].includes(effort)) {
+    throw new Error(`--effort must be one of low|medium|high|xhigh (got "${effort}")`);
+  }
+  await resumeBench({
+    runDir,
     maxUsd: optNum(p.flags, "budget-usd"),
     maxWallMins: optNum(p.flags, "budget-mins"),
     maxTurns: optNum(p.flags, "max-turns"),
@@ -220,6 +251,9 @@ async function main(): Promise<void> {
   switch (p.command) {
     case "run":
       await cmdRun(p);
+      break;
+    case "resume":
+      await cmdResume(p);
       break;
     case "gate":
       await cmdGate(p);

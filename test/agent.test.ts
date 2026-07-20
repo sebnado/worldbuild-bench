@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Agent } from "../src/agent/agent.js";
+import { Agent, AgentCheckpoint } from "../src/agent/agent.js";
 import { BudgetTracker } from "../src/agent/budget.js";
 import { Transcript } from "../src/agent/transcript.js";
 import { ModelEntry } from "../src/providers/index.js";
@@ -685,6 +685,266 @@ test("served model ids are recorded and divergence tolerated", async () => {
   // Call 2 is the finish-nudge confirmation, served as the requested id —
   // every distinct served id is recorded.
   assert.deepEqual(result.stats.servedModels, ["mock-1-actually-served", "mock-1"]);
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+test("checkpoint: tool rounds are persisted incrementally and finish at clean boundaries", async () => {
+  const workspace = makeWorkspace();
+  const checkpoints: AgentCheckpoint[] = [];
+  const provider = new MockProvider(async (_req, idx) => {
+    if (idx === 0) {
+      return {
+        content: [{ type: "tool_use", id: "c1", name: "write_file", input: { path: "a.txt", content: "one" } }],
+        stopReason: "tool_use",
+        usage: USAGE,
+      };
+    }
+    if (idx === 1) {
+      return {
+        content: [{ type: "tool_use", id: "c2", name: "bash", input: { command: "true" } }],
+        stopReason: "tool_use",
+        usage: USAGE,
+      };
+    }
+    // Tool-less reply → nudge, then confirm; neither is a checkpoint boundary.
+    return { content: [{ type: "text", text: "first pass complete" }], stopReason: "end_turn", usage: USAGE };
+  });
+  const agent = new Agent({
+    provider,
+    model: MODEL,
+    tools: [bashTool, readFileTool, writeFileTool, spawnAgentTool],
+    workspace,
+    budget: new BudgetTracker(),
+    transcript: new Transcript(null, true),
+    onCheckpoint: (cp) => checkpoints.push(structuredClone(cp)),
+  });
+  await agent.run("build");
+
+  // Each tool round records pending, running, completed, then clean state.
+  const clean = checkpoints.filter((cp) => cp.inFlightToolCalls === undefined);
+  assert.equal(clean.length, 2);
+  assert.ok(
+    checkpoints.some((cp) => cp.inFlightToolCalls?.[0]?.status === "pending"),
+    "assistant tool calls must be durable before execution starts",
+  );
+  assert.ok(checkpoints.some((cp) => cp.inFlightToolCalls?.[0]?.status === "running"));
+  assert.ok(checkpoints.some((cp) => cp.inFlightToolCalls?.[0]?.status === "completed"));
+  const last = clean[clean.length - 1];
+  const lastMsg = last.messages[last.messages.length - 1];
+  assert.equal(lastMsg.role, "user", "a checkpoint must end on a resumable user message");
+  assert.ok(
+    lastMsg.content.some((b) => b.type === "tool_result"),
+    "the trailing user message must carry tool results",
+  );
+  assert.equal(last.stats.turns, 2);
+  assert.equal(last.stats.toolCalls.write_file, 1);
+  assert.equal(last.stats.toolCalls.bash, 1);
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+test("checkpoint: budget exhaustion still snapshots the final tool round, clean", async () => {
+  const workspace = makeWorkspace();
+  const checkpoints: AgentCheckpoint[] = [];
+  // $0.001/token out; each call consumes its full 1000-token grant → $1/turn.
+  const PRICED_MODEL: ModelEntry = {
+    ...MODEL,
+    pricing: { input_per_mtok: 0, output_per_mtok: 1000 },
+  };
+  const provider = new MockProvider(async (req, idx) => {
+    const usage = { inputTokens: 0, outputTokens: req.maxTokens };
+    if (idx === 0) {
+      return {
+        content: [{ type: "tool_use", id: "c1", name: "write_file", input: { path: "a.txt", content: "one" } }],
+        stopReason: "tool_use",
+        usage,
+      };
+    }
+    return { content: [{ type: "text", text: "wrapped up" }], stopReason: "end_turn", usage };
+  });
+  // $1 cap: turn 0 spends exactly $1, so budget.exceeded() trips right after the
+  // tool round — the path that previously skipped the checkpoint.
+  const agent = new Agent({
+    provider,
+    model: PRICED_MODEL,
+    tools: [bashTool, readFileTool, writeFileTool, spawnAgentTool],
+    workspace,
+    budget: new BudgetTracker({ maxUsd: 1 }),
+    transcript: new Transcript(null, true),
+    maxTokensPerTurn: 1000,
+    onCheckpoint: (cp) => checkpoints.push(structuredClone(cp)),
+  });
+  const result = await agent.run("build");
+
+  assert.match(result.stats.budgetExhausted ?? "", /cost budget/);
+  // The one tool round reached a clean checkpoint despite the budget tripping on it.
+  const clean = checkpoints.filter((cp) => cp.inFlightToolCalls === undefined);
+  assert.equal(clean.length, 1, "the final tool round must be resumable");
+  const cp = clean[0];
+  const last = cp.messages[cp.messages.length - 1];
+  assert.equal(last.role, "user");
+  assert.ok(last.content.some((b) => b.type === "tool_result"), "snapshot carries the tool results");
+  // ...and the snapshot is clean — no wrap-up scaffolding leaked into it, so a
+  // resume continues from real work, not a "budget exhausted, summarize" prompt.
+  assert.ok(
+    !last.content.some((b) => b.type === "text" && /Budget exhausted/.test(b.text)),
+    "the checkpoint must not contain wrap-up text",
+  );
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+test("resume: replays the exact checkpoint history and preserves cumulative stats", async () => {
+  const workspace = makeWorkspace();
+
+  // Segment 1: one tool round, then the run stops (as if budget-exhausted).
+  const checkpoints: AgentCheckpoint[] = [];
+  const seg1 = new MockProvider(async (_req, idx) => {
+    if (idx === 0) {
+      return {
+        content: [{ type: "tool_use", id: "c1", name: "write_file", input: { path: "a.txt", content: "one" } }],
+        stopReason: "tool_use",
+        usage: USAGE,
+      };
+    }
+    return { content: [{ type: "text", text: "stopped early" }], stopReason: "end_turn", usage: USAGE };
+  });
+  const agent1 = new Agent({
+    provider: seg1,
+    model: MODEL,
+    tools: [bashTool, readFileTool, writeFileTool, spawnAgentTool],
+    workspace,
+    budget: new BudgetTracker(),
+    transcript: new Transcript(null, true),
+    onCheckpoint: (cp) => checkpoints.push(structuredClone(cp)),
+  });
+  await agent1.run("build the game");
+  const snapshot = checkpoints[checkpoints.length - 1];
+  assert.ok(snapshot, "segment 1 must produce a checkpoint");
+
+  // Segment 2: resume from the snapshot with a fresh budget.
+  let sawPriorHistory = false;
+  let sawExactHistory = false;
+  const seg2 = new MockProvider(async (req, idx) => {
+    if (idx === 0) {
+      sawPriorHistory = req.messages.some(
+        (m) => m.role === "assistant" && m.content.some((b) => b.type === "tool_use" && b.id === "c1"),
+      );
+      sawExactHistory = JSON.stringify(req.messages) === JSON.stringify(snapshot.messages);
+      return {
+        content: [{ type: "tool_use", id: "c2", name: "bash", input: { command: "true" } }],
+        stopReason: "tool_use",
+        usage: USAGE,
+      };
+    }
+    return { content: [{ type: "text", text: "finished after resume" }], stopReason: "end_turn", usage: USAGE };
+  });
+  const agent2 = new Agent({
+    provider: seg2,
+    model: MODEL,
+    tools: [bashTool, readFileTool, writeFileTool, spawnAgentTool],
+    workspace,
+    budget: new BudgetTracker(),
+    transcript: new Transcript(null, true),
+    resumeState: snapshot,
+  });
+  const resumed = await agent2.run("THIS INITIAL MESSAGE IS IGNORED ON RESUME");
+
+  assert.ok(sawPriorHistory, "resumed conversation must replay the prior history");
+  assert.ok(sawExactHistory, "resume must not inject or alter conversation messages");
+  // The ignored initial message must not have started a fresh conversation.
+  assert.ok(
+    !firstUserText(seg2.requests[0]).includes("IGNORED"),
+    "resume must not seed the ignored initial message",
+  );
+  assert.equal(resumed.finalText, "finished after resume");
+  // Segment 1 checkpoint captured 1 turn; the resume adds exactly 3 (bash round,
+  // the tool-less reply that draws the nudge, then the confirming reply). Exact
+  // totals — not just ">" — so any double-counting of a segment would fail here.
+  assert.equal(snapshot.stats.turns, 1);
+  assert.equal(resumed.stats.turns, 4, "cumulative = 1 prior + 3 resumed, counted once");
+  assert.equal(resumed.stats.inputTokens, 400, "100 prior + 3 x 100");
+  assert.equal(resumed.stats.outputTokens, 200, "50 prior + 3 x 50");
+  // 4 turns x (100 in x $1/M + 50 out x $2/M) = 4 x $0.0002.
+  assert.ok(Math.abs(resumed.stats.costUsd - 0.0008) < 1e-9, "cost cumulative, not doubled");
+  assert.equal(resumed.stats.toolCalls.write_file, 1, "prior tool-call counts carry forward");
+  assert.equal(resumed.stats.toolCalls.bash, 1, "new tool calls stack on top");
+  assert.equal(resumed.stats.budgetExhausted, null, "the fresh window resets the exhaustion flag");
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
+
+test("resume: interrupted running tools become results and are never replayed", async () => {
+  const { z } = await import("zod");
+  const workspace = makeWorkspace();
+  let executions = 0;
+  const dangerousTool = {
+    def: {
+      name: "dangerous_append",
+      description: "non-idempotent test tool",
+      inputSchema: { type: "object", properties: {} },
+    },
+    schema: z.object({}),
+    execute: async () => {
+      executions += 1;
+      return "appended";
+    },
+  };
+  const call = {
+    type: "tool_use" as const,
+    id: "uncertain_1",
+    name: "dangerous_append",
+    input: {},
+  };
+  const snapshot: AgentCheckpoint = {
+    messages: [
+      { role: "user", content: [{ type: "text", text: "build" }] },
+      { role: "assistant", content: [call] },
+    ],
+    finalText: "working",
+    stats: {
+      turns: 1,
+      inputTokens: 100,
+      cachedInputTokens: 0,
+      outputTokens: 50,
+      costUsd: 0.0002,
+      toolCalls: { dangerous_append: 1 },
+      subagentsSpawned: 0,
+      imagesSent: 0,
+      budgetExhausted: null,
+      servedModels: [],
+    },
+    ownTurns: 1,
+    directChildren: 4,
+    tasks: [{ title: "Inspect interrupted work", status: "in_progress" }],
+    inFlightToolCalls: [{ call, status: "running" }],
+  };
+  const provider = new MockProvider(async (req, idx) => {
+    if (idx === 0) {
+      const last = req.messages.at(-1);
+      assert.equal(last?.role, "user");
+      const result = last?.content.find((block) => block.type === "tool_result");
+      assert.ok(result && result.type === "tool_result");
+      assert.equal(result.tool_use_id, call.id);
+      assert.equal(result.is_error, true);
+      assert.match(result.content, /side effects may already exist/i);
+    } else {
+      assert.ok(lastMessageIsNudge(req));
+    }
+    return { content: [{ type: "text", text: "recovered safely" }], stopReason: "end_turn", usage: USAGE };
+  });
+  const agent = new Agent({
+    provider,
+    model: MODEL,
+    tools: [dangerousTool],
+    workspace,
+    budget: new BudgetTracker(),
+    transcript: new Transcript(null, true),
+    resumeState: snapshot,
+  });
+  await agent.run("");
+
+  assert.equal(executions, 0, "an uncertain operation must never run automatically");
+  const runtime = agent.snapshotRuntimeState();
+  assert.equal(runtime.directChildren, 4, "child labels continue after resume");
+  assert.deepEqual(runtime.tasks, snapshot.tasks, "runtime task state survives resume");
   fs.rmSync(workspace, { recursive: true, force: true });
 });
 
