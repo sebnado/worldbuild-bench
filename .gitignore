@@ -11,3 +11,7 @@ old/
 pi/
 TECHNICAL_DEBT.md
 REPORT.md
+runs-invalid/
+__pycache__/
+*.py[cod]
+/todo.txt
