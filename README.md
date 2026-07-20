@@ -4,12 +4,12 @@
 
 **Same brief, same tools, same harness. Build a 3D game someone would actually want to keep playing.**
 
-[![License](https://img.shields.io/badge/license-MIT-0f0f0f?style=flat-square)](LICENSE) [![Node](https://img.shields.io/badge/node-%E2%89%A5%2020-0f0f0f?style=flat-square)](package.json) [![Model registry](https://img.shields.io/badge/model%20registry-14-0f0f0f?style=flat-square)](models.json) [![Playable builds](https://img.shields.io/badge/playable%20builds-24-7c3aed?style=flat-square)](https://sandscape.app/worldbuild/rounds/ai-game-benchmark-2026-07-13) [![Leaderboard](https://img.shields.io/badge/live%20leaderboard-sandscape.app-7c3aed?style=flat-square)](https://sandscape.app/worldbuild)
+[![License](https://img.shields.io/badge/license-MIT-0f0f0f?style=flat-square)](LICENSE) [![Node](https://img.shields.io/badge/node-%E2%89%A5%2020-0f0f0f?style=flat-square)](package.json) [![Model registry](https://img.shields.io/badge/model%20registry-15-0f0f0f?style=flat-square)](models.json) [![Playable builds](https://img.shields.io/badge/playable%20builds-27-7c3aed?style=flat-square)](https://sandscape.app/worldbuild/rounds/ai-game-benchmark-2026-07-13) [![Leaderboard](https://img.shields.io/badge/live%20leaderboard-sandscape.app-7c3aed?style=flat-square)](https://sandscape.app/worldbuild)
 
 <img src="docs/assets/racing-compare.webp" alt="Three AI-built racing games running side by side: Grok 4.5, GPT-5.6 Sol, and Claude Fable 5, each from the same Sunset Apex brief" width="100%">
 
 <sub><b>One brief: <i>Sunset Apex</i>, a 3-lap circuit racer. Three models. Three completely different games.</b><br>
-Real, unedited gameplay. All 24 builds from the round are playable in your browser right now.</sub>
+Real, unedited gameplay. All 27 builds from the round are playable in your browser right now.</sub>
 
 ### [▶ Play the builds](https://sandscape.app/worldbuild/rounds/ai-game-benchmark-2026-07-13) · [Vote in the Arena](https://sandscape.app/worldbuild/arena?round=ai-game-benchmark-2026-07-13) · [Methodology](https://sandscape.app/worldbuild/methodology) · [Round data](https://sandscape.app/worldbuild/data/ai-game-benchmark-2026-07-13)
 
@@ -39,11 +39,11 @@ Each brief is a short GDD (~30 lines) that pins the game's name, setting, aesthe
 
 ## The July 2026 pilot round
 
-The first round runs eight models on the same three briefs (arena combat, physics puzzle, racing). That produced **24 browser-playable 3D games**. Every run shipped a build that loads and runs.
+The first round runs nine models on the same three briefs (arena combat, physics puzzle, racing). That produced **27 browser-playable 3D games**. Every run shipped a build that loads and runs.
 [Play them all →](https://sandscape.app/worldbuild/rounds/ai-game-benchmark-2026-07-13)
 
 Claude Fable 5 · Claude Opus 4.8 · Claude Sonnet 5 · GLM-5.2 · GPT-5.5 · GPT-5.6 Sol ·
-GPT-5.6 Terra · Grok 4.5
+GPT-5.6 Terra · Grok 4.5 · Kimi K3
 
 More open-source models are planned; cost (especially after running Fable) is prohibitive for now. All models ran in high thinking mode through this harness, with the same prompt, the same subagents, and the same basic setup (Three.js, Rapier, Playwright).
 
@@ -62,7 +62,7 @@ Because those qualities are difficult to score automatically, the main evaluatio
 
 How long each model took, what it cost, and how much code it wrote. Published for transparency and not as a quality signal.
 
-Cost varied a lot: Fable averaged ~$252 per game (over half the round's ~$1,390 spend), Opus ~$68, Sol ~$36, and GLM / Grok ~$6 each.
+Cost varied a lot: Fable averaged ~$252 per game (over half the matrix's ~$1,390 spend), Opus ~$68, Sol ~$36, and GLM / Grok ~$6 each.
 
 <table>
 <tr>
@@ -101,6 +101,7 @@ cp .env.example .env           # fill in the keys for the models you want to run
 npx tsx src/cli.ts models      # the registry
 npx tsx src/cli.ts tasks       # the task briefs
 npx tsx src/cli.ts run --task <task> --model claude-sonnet-5 --budget-usd 5 --budget-mins 20
+npx tsx src/cli.ts resume runs/<run-id> --budget-usd 10   # continue a run that stopped early
 npx tsx src/cli.ts gate runs/<run-id>          # re-score an existing run
 npx tsx src/cli.ts report --round july-2026    # merge runs into a round JSON
 ```
@@ -128,7 +129,9 @@ Or build once and use the `wb` bin: `npm run build && node dist/cli.js --help`.
                         ┌──────────────▼───────────────┐
    tasks/<slug>/TASK.md │  runs/<ts>-<task>-<model>/   │  workspace seeded from scaffold/
    scaffold/ + lib/  ──►│  workspace · transcript.jsonl│  (import map → bundled three.js)
-                        │  result.json · screenshots/  │
+                        │  result.json · screenshots/  │  resume-state.json → `wb resume`
+                        │  resume-state.json           │  (self-describing atomic checkpoint;
+                        │                              │   one active process per run)
                         └──────────────┬───────────────┘
                                        │
                         ┌──────────────▼───────────────┐
@@ -154,6 +157,15 @@ Or build once and use the `wb` bin: `npm run build && node dist/cli.js --help`.
   `state_changed` flag — so models verify cause and effect, not just looks.
 - **Task tracking**: `update_tasks` keeps a per-agent task list (each call replaces the
   whole list) so models can plan multi-step work and keep the plan current.
+- **Crash-safe resume**: the root agent atomically checkpoints the assistant tool-call
+  turn before execution, every completed result, and the clean end of the round. On
+  recovery, calls with uncertain side effects are reported as interrupted rather than
+  replayed; the model can inspect the existing workspace before retrying. One lifecycle
+  lease covers both fresh and resumed runs, preventing concurrent mutation. Each resumed
+  segment gets fresh caps defaulting to the previous segment, while result totals stay
+  cumulative. New checkpoints also pin the resolved provider endpoint and credential
+  selector (never the secret), preventing a registry or environment change from silently
+  routing a resumed run through a different service.
 - **Visual feedback**: `test_game` attaches its playtest screenshots (2s / post-input /
   10s JPEGs) — and `play_game` its requested captures — to the tool result for models
   flagged `vision` in `models.json`; text-only models get the identical JSON report
@@ -171,7 +183,8 @@ var holding its key. Any OpenAI-compatible endpoint works via `base_url`.
 | `ANTHROPIC_API_KEY` | `claude-*` models (Messages API) |
 | `OPENAI_API_KEY` | `gpt-*` models (Responses API) |
 | `GEMINI_API_KEY` | `gemini-*` models (generateContent) |
-| `OPENROUTER_API_KEY` | OpenRouter-routed entries (glm / minimax / qwen / kimi / deepseek) |
+| `MOONSHOT_API_KEY` | `kimi-*` models (Moonshot, OpenAI-compatible) |
+| `OPENROUTER_API_KEY` | OpenRouter-routed entries (glm / minimax / qwen / deepseek / grok) |
 | `GROQ_API_KEY` / `CEREBRAS_API_KEY` | optional — for registry entries you add pointing at Groq / Cerebras |
 | `*_BASE_URL` (e.g. `ANTHROPIC_BASE_URL`) | optional endpoint overrides per provider |
 
