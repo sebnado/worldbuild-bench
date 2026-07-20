@@ -167,6 +167,10 @@ export class OpenAIProvider implements Provider {
 
     for (const m of req.messages) {
       if (m.role === "assistant") {
+        const reasoningContent = m.content
+          .filter((b) => b.type === "chat_reasoning")
+          .map((b) => b.reasoningContent)
+          .join("\n");
         const text = m.content
           .filter((b) => b.type === "text")
           .map((b) => (b as { text: string }).text)
@@ -181,7 +185,11 @@ export class OpenAIProvider implements Provider {
               function: { name: t.name, arguments: JSON.stringify(t.input ?? {}) },
             };
           });
+        // Strict providers (Moonshot) 400 on an assistant message with neither
+        // content nor tool_calls, and it would carry nothing anyway — drop it.
+        if (!reasoningContent && !text && toolCalls.length === 0) continue;
         const msg: Record<string, unknown> = { role: "assistant", content: text || null };
+        if (reasoningContent) msg.reasoning_content = reasoningContent;
         if (toolCalls.length > 0) msg.tool_calls = toolCalls;
         messages.push(msg);
       } else {
@@ -247,6 +255,9 @@ export class OpenAIProvider implements Provider {
     const choice = json.choices?.[0];
     const msg = choice?.message ?? {};
     const content: ContentBlock[] = [];
+    if (typeof msg.reasoning_content === "string" && msg.reasoning_content.length > 0) {
+      content.push({ type: "chat_reasoning", reasoningContent: msg.reasoning_content });
+    }
     if (typeof msg.content === "string" && msg.content.length > 0) {
       content.push({ type: "text", text: msg.content });
     }
@@ -274,7 +285,7 @@ export class OpenAIProvider implements Provider {
 
     const usage = json.usage ?? {};
     // prompt_tokens includes cached; cached_tokens is the billed subset.
-    const cachedTokens = usage.prompt_tokens_details?.cached_tokens ?? 0;
+    const cachedTokens = usage.prompt_tokens_details?.cached_tokens ?? usage.cached_tokens ?? 0;
     return {
       content,
       stopReason: finishMap[choice?.finish_reason as string] ?? "other",

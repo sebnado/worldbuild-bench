@@ -69,6 +69,15 @@ export interface ResponsesReasoningBlock {
   item: unknown;
 }
 
+/**
+ * OpenAI-compatible Chat Completions reasoning state. Providers such as
+ * Moonshot require this field to be echoed verbatim in later tool-call turns.
+ */
+export interface ChatReasoningBlock {
+  type: "chat_reasoning";
+  reasoningContent: string;
+}
+
 export type ContentBlock =
   | TextBlock
   | ToolUseBlock
@@ -76,7 +85,8 @@ export type ContentBlock =
   | ImageBlock
   | ThinkingBlock
   | RedactedThinkingBlock
-  | ResponsesReasoningBlock;
+  | ResponsesReasoningBlock
+  | ChatReasoningBlock;
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -101,7 +111,7 @@ export interface ChatRequest {
    * Mapped per provider: OpenAI/OpenRouter reasoning.effort, Anthropic
    * output_config.effort, Gemini thinkingLevel (no xhigh — clamps to HIGH).
    */
-  reasoningEffort?: ReasoningEffort;
+  reasoningEffort?: string;
   /** Per-attempt fetch timeout; agent caps this to remaining wall-clock. */
   timeoutMs?: number;
 }
@@ -151,7 +161,30 @@ export class ProviderHttpError extends Error {
   }
 }
 
-const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504, 529]);
+/**
+ * The connection failed without an HTTP response. The provider may still have
+ * accepted and completed the request, so automatically replaying it could
+ * duplicate work and charges.
+ */
+export class ProviderTransportError extends Error {
+  constructor(
+    public provider: string,
+    cause: unknown,
+  ) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `${provider} transport failure; request outcome is unknown and was not retried ` +
+        `to avoid duplicate provider work or charges: ${detail}`,
+      { cause },
+    );
+    this.name = "ProviderTransportError";
+  }
+}
+
+// These statuses indicate rejection before inference. Generic timeouts and 5xx
+// responses can arrive after upstream work completed, so replaying them is not
+// safe without an idempotency contract shared by every supported provider.
+const RETRYABLE_STATUSES = new Set([429, 529]);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -179,6 +212,9 @@ const MAX_RETRY_WAIT_MS = 60_000;
 const QUOTA_BODY_RE =
   /insufficient_quota|quota exceeded|exceeded your (current )?quota|usage limit|usage cap|plan limit|monthly limit|weekly limit|billing_hard_limit_reached/i;
 
+/** Error `type`s in a 2xx body that retrying cannot clear. */
+const TERMINAL_BODY_ERROR_RE = /invalid_request|authentication|permission|not_found|invalid_api_key/i;
+
 /** True when a non-2xx must not be retried (non-retryable status, long retry-after, or hard quota). */
 export function isTerminalHttpError(
   status: number,
@@ -191,7 +227,12 @@ export function isTerminalHttpError(
   return QUOTA_BODY_RE.test(body);
 }
 
-/** POST JSON; retries 408/429/5xx/529 and network errors with backoff. */
+/**
+ * POST JSON. Explicit rate-limit/overload rejections and provider error payloads
+ * are retried with backoff.
+ * Transport failures are never replayed automatically: once a POST is handed
+ * to fetch, there is no portable way to know whether the provider accepted it.
+ */
 export async function fetchJson(
   provider: string,
   url: string,
@@ -214,10 +255,7 @@ export async function fetchJson(
       });
       text = await res.text();
     } catch (e) {
-      lastError = e;
-      if (attempt === maxAttempts) throw e;
-      await sleep(backoffMs(attempt));
-      continue;
+      throw new ProviderTransportError(provider, e);
     }
     if (!res.ok) {
       const err = new ProviderHttpError(provider, res.status, text);
@@ -231,11 +269,25 @@ export async function fetchJson(
       await sleep(Math.min(wait, MAX_RETRY_WAIT_MS));
       continue;
     }
+    let json: any;
     try {
-      return JSON.parse(text);
+      json = JSON.parse(text);
     } catch {
       throw new ProviderHttpError(provider, res.status, `invalid JSON body: ${text.slice(0, 500)}`);
     }
+    // Some providers (e.g. Moonshot) report transient faults as HTTP 200 with an
+    // error payload and no choices. Left alone these parse into an empty turn,
+    // which the caller would then append to history as an empty assistant
+    // message — permanently poisoning the conversation for strict providers.
+    if (json?.error) {
+      const terminal = TERMINAL_BODY_ERROR_RE.test(text) || QUOTA_BODY_RE.test(text);
+      const err = new ProviderHttpError(provider, terminal ? 400 : 503, text);
+      if (terminal || attempt === maxAttempts) throw err;
+      lastError = err;
+      await sleep(backoffMs(attempt));
+      continue;
+    }
+    return json;
   }
   throw lastError;
 }

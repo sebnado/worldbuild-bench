@@ -1,5 +1,12 @@
 {
-  "$comment": "WorldBuild Bench model registry. pricing is USD per million tokens (editable \u2014 Anthropic rows verified against the official price sheet 2026-07-03; non-Anthropic rows verified against provider/OpenRouter listings 2026-07-03 \u2014 OpenRouter prices float by routed provider, and MiniMax M3 ($0.30/$1.20 launch discount, $0.60/$2.40 list) and Qwen3.7 Max ($1.25/$3.75 promo, $2.50/$7.50 list) carry time-limited discounts; Claude Sonnet 5 is intro-priced $2/$10 through 2026-08-31 then $3/$15; Gemini 3.1 Pro bills 2x input / 1.5x output above 200K-token prompts, which this flat pricing does not model \u2014 re-verify every row before publishing a round). base_url_env, when set and present in the environment, overrides base_url. provider is one of: anthropic | openai | google. The openai provider serves any OpenAI-compatible endpoint (OpenRouter, Groq, Cerebras) via base_url; api.openai.com itself goes through the Responses API (current OpenAI reasoning models reject function tools + reasoning effort on chat/completions). thinking: 'adaptive' enables Anthropic adaptive thinking on models that support it (reasoning-by-default parity with the other providers). max_output_tokens is the per-turn output cap sent to the provider: min(the model's documented max completion tokens, a 32768 practical ceiling \u2014 the adapters are non-streaming with a 600s per-attempt fetch window, so longer single replies would abort on timeout; Anthropic rows are 16384 because the direct Anthropic API requires streaming for requests that may exceed 10 minutes). Documented max completion tokens verified against the OpenRouter models API 2026-07-04: GLM-5.2 128000, MiniMax M3 512000, Qwen3.7 Max 65536, Kimi K2.7 Code 16384 (the one binding value), DeepSeek V4 Pro 384000, GPT-5.5 128000, Gemini 3.1 Pro 65536, Claude Sonnet 5 / Opus 4.8 / Fable 5 128000, Haiku 4.5 64000. Reasoning tokens count against the cap where billed as output. Cache pricing (input_cache_read_per_mtok / input_cache_write_per_mtok) verified against the OpenRouter models API 2026-07-04: Anthropic reads are 0.1x input and 5-minute cache writes 1.25x input per the official price sheet; GPT-5.5 cached input is 10% of list; Gemini 3.1 Pro implicit-caching reads are $0.20/M (explicit-cache storage fees not modeled). Cached rates matter for the direct-API rows \u2014 where the provider returns exact cost (OpenRouter) it overrides the table. reasoning_effort (low|medium|high|xhigh), when set on a row, requests that effort tier via the provider's native control (OpenAI Responses reasoning.effort, OpenRouter reasoning.effort, Anthropic output_config.effort, Gemini thinkingLevel \u2014 xhigh clamps to HIGH); unset = provider default. wb run --effort overrides per run; the tier used is recorded in result.json. vision: true marks models that accept image input (all Anthropic rows, GPT-5.5, Gemini 3.1 Pro per provider docs; OpenRouter rows verified against the OpenRouter models API input_modalities 2026-07-05: minimax-m3 and kimi-k2.7-code accept images; glm-5.2, qwen3.7-max, deepseek-v4-pro are text-only). Vision models receive the test_game playtest screenshots (2s / post-input / 10s JPEGs) attached after the JSON report; text-only models get the identical JSON report with no images \u2014 whether a run had visual feedback is recorded in result.json (model.vision, agent.images_sent).",
+  "$comment": "WorldBuild Bench model registry. Prices are USD per million tokens and must be re-verified before publishing each round.",
+  "$comment_pricing": "Anthropic rows were checked against the official price sheet 2026-07-03. Direct Kimi rows were checked against official Moonshot pricing and model documentation 2026-07-20. Other non-Anthropic rows were checked against provider/OpenRouter listings 2026-07-03. OpenRouter routing prices can change; MiniMax M3 and Qwen3.7 Max currently carry promotional rates, Claude Sonnet 5 is intro-priced through 2026-08-31, and Gemini 3.1 Pro tiered pricing above 200K input tokens is not represented by this flat table.",
+  "$comment_routing": "provider selects the adapter (anthropic | openai | google). The openai adapter also serves compatible endpoints such as Moonshot and OpenRouter. base_url_env overrides base_url when set; api_key_env names the credential variable but never contains the credential.",
+  "$comment_output_caps": "max_output_tokens is the per-turn cap sent to the provider: the lesser of the documented model maximum and a 32768 practical ceiling for non-streaming requests. Anthropic rows use 16384 because direct requests that may exceed ten minutes require streaming. Reasoning tokens count against the cap where the provider bills them as output.",
+  "$comment_cache": "Cached reads and writes use the published rates below. Anthropic reads are 0.1x input and five-minute writes are 1.25x; GPT-5.5 cached input is 10% of list; Gemini 3.1 Pro implicit-cache reads are $0.20/M. A provider-reported exact cost, when available, overrides this reference table.",
+  "$comment_reasoning": "reasoning_effort is the generic CLI tier used for the run. reasoning_effort_map translates supported generic tiers to provider-native values; the direct Moonshot Kimi K3 route maps every accepted tier to its documented max setting. The selected generic tier is recorded in result.json.",
+  "$comment_vision": "vision marks models that accept image input. Direct Moonshot Kimi rows, Anthropic rows, GPT-5.5, Gemini 3.1 Pro, and OpenRouter MiniMax M3 are enabled; GLM-5.2, Qwen3.7 Max, and DeepSeek V4 Pro are text-only. Vision models receive playtest screenshots, and result.json records whether images were sent.",
+  "$comment_reasoning_effort_map": "Optional mapping from generic CLI tiers to provider-native effort values. Declaring a map restricts a model to the listed generic tiers. WorldBuild Bench runs Kimi K3 at max effort for consistent comparisons, so every accepted generic CLI tier maps to max.",
   "models": [
     {
       "id": "claude-fable-5",
@@ -187,16 +194,38 @@
       "id": "kimi-k2.7-code",
       "name": "Kimi K2.7 Code",
       "provider": "openai",
-      "provider_model_id": "moonshotai/kimi-k2.7-code",
-      "base_url": "https://openrouter.ai/api/v1",
-      "base_url_env": "OPENROUTER_BASE_URL",
-      "api_key_env": "OPENROUTER_API_KEY",
+      "provider_model_id": "kimi-k2.7-code",
+      "base_url": "https://api.moonshot.ai/v1",
+      "base_url_env": "MOONSHOT_BASE_URL",
+      "api_key_env": "MOONSHOT_API_KEY",
       "pricing": {
-        "input_per_mtok": 0.74,
-        "output_per_mtok": 3.5,
-        "input_cache_read_per_mtok": 0.15
+        "input_per_mtok": 0.95,
+        "output_per_mtok": 4.0,
+        "input_cache_read_per_mtok": 0.19
       },
       "max_output_tokens": 16384,
+      "vision": true
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3",
+      "provider": "openai",
+      "provider_model_id": "kimi-k3",
+      "base_url": "https://api.moonshot.ai/v1",
+      "base_url_env": "MOONSHOT_BASE_URL",
+      "api_key_env": "MOONSHOT_API_KEY",
+      "pricing": {
+        "input_per_mtok": 3.0,
+        "output_per_mtok": 15.0,
+        "input_cache_read_per_mtok": 0.3
+      },
+      "reasoning_effort_map": {
+        "low": "max",
+        "medium": "max",
+        "high": "max",
+        "xhigh": "max"
+      },
+      "max_output_tokens": 32768,
       "vision": true
     },
     {

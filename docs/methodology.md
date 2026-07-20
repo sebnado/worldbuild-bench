@@ -55,7 +55,11 @@ The headline **WorldBuild Rating** combines them (weights below).
   OpenRouter to each routed model's nearest supported level), Anthropic
   `output_config.effort`, Gemini `thinkingConfig.thinkingLevel` (no xhigh; clamps
   to HIGH). Unset — the default — means provider default. The tier actually
-  requested is recorded per run in `result.json` (`model.reasoning_effort`).
+  requested is recorded per run in `result.json` (`model.reasoning_effort`). A
+  registry row can declare `reasoning_effort_map` when a provider exposes a
+  different or narrower native vocabulary; Kimi K3 has only Moonshot's native
+  `max`, so any explicit generic tier is sent as `max` while the requested tier
+  remains recorded in result metadata.
 - **Visual feedback: vision models see their playtest screenshots.** `test_game`
   attaches its playtest screenshots (~2s after load, right after the input probe,
   ~10s; JPEG) — and `play_game` the captures requested by its screenshot actions — to
@@ -93,11 +97,13 @@ The headline **WorldBuild Rating** combines them (weights below).
   action ("Let me now test the game.") and stop without issuing the tool call —
   without the nudge, that stop quirk ends a run with the game unfinished and
   scores would measure tool-call discipline rather than the game built.
-- Transient provider errors (408/429/5xx/529, network timeouts) are retried with
-  exponential backoff and jitter (honoring `retry-after`, up to 5 attempts) so models
-  on busier providers are not penalized by one-off rate limits. If a run still aborts,
-  the partial turn/token/cost accounting up to the failure is recorded in
-  `result.json` together with the error.
+- Explicit rate-limit/overload rejections (429/529 and transient error payloads) are
+  retried with exponential backoff and jitter (honoring `retry-after`, up to 5
+  attempts). Transport failures, client-side timeouts, and generic 5xx responses are
+  not replayed automatically: upstream inference may already have completed and been
+  billed even though no successful response arrived. The run stops at its durable
+  checkpoint and can be resumed explicitly. Partial turn/token/cost accounting is
+  recorded in `result.json` with the error.
 - Every run keeps a full JSONL transcript (requests, responses, tool calls, results,
   usage, costs) so results can be audited and reproduced.
 - The tool actually used is recorded in results — there are no silent fallbacks. The

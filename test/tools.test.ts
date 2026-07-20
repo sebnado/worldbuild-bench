@@ -45,6 +45,7 @@ test("bash tool: sanitized env — provider keys are not inherited", async () =>
     ANTHROPIC_API_KEY: "fake-anthropic-key-must-not-leak",
     OPENAI_API_KEY: "fake-openai-key-must-not-leak",
     GEMINI_API_KEY: "fake-gemini-key-must-not-leak",
+    MOONSHOT_API_KEY: "fake-moonshot-key-must-not-leak",
     OPENROUTER_API_KEY: "fake-openrouter-key-must-not-leak",
     GROQ_API_KEY: "fake-groq-key-must-not-leak",
     CEREBRAS_API_KEY: "fake-cerebras-key-must-not-leak",
@@ -56,11 +57,15 @@ test("bash tool: sanitized env — provider keys are not inherited", async () =>
   }
   try {
     const envOut = await bashTool.execute({ command: "env" }, ctx);
-    assert.doesNotMatch(
-      envOut,
-      /ANTHROPIC|OPENAI|GEMINI|OPENROUTER|GROQ|CEREBRAS/i,
-      "no provider key material may reach the child environment",
+    const childKeys = new Set(
+      envOut
+        .split("\n")
+        .map((line) => line.slice(0, line.indexOf("=")))
+        .filter(Boolean),
     );
+    for (const key of Object.keys(fakes)) {
+      assert.ok(!childKeys.has(key), `${key} may not reach the child environment`);
+    }
     for (const v of Object.values(fakes)) {
       assert.ok(!envOut.includes(v), "key value leaked into bash env");
     }

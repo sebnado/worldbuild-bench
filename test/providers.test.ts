@@ -7,10 +7,16 @@ import { OpenAIProvider } from "../src/providers/openai.js";
 import {
   ChatRequest,
   ProviderHttpError,
+  ProviderTransportError,
   fetchJson,
   isTerminalHttpError,
 } from "../src/providers/types.js";
-import { getModel, loadRegistry } from "../src/providers/index.js";
+import {
+  getModel,
+  loadRegistry,
+  nativeReasoningEffortOf,
+  setReasoningEffort,
+} from "../src/providers/index.js";
 
 /** Stub global fetch, capture request bodies, return a scripted JSON reply. */
 async function withFetchStub<T>(
@@ -272,6 +278,73 @@ test("openai responses: reasoning + function_call items replayed verbatim; tool 
   });
 });
 
+test("openai chat: Moonshot reasoning state and direct cache usage survive replay", async () => {
+  const reply = {
+    model: "kimi-k2.7-code",
+    choices: [
+      {
+        message: {
+          content: null,
+          reasoning_content: "opaque reasoning state",
+          tool_calls: [
+            { id: "call_1", type: "function", function: { name: "bash", arguments: '{"command":"ls"}' } },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+    usage: { prompt_tokens: 100, completion_tokens: 20, cached_tokens: 80 },
+  };
+  await withFetchStub([reply, reply], async (captured) => {
+    const p = new OpenAIProvider("https://api.moonshot.ai/v1", "k");
+    const first = await p.chat({
+      ...BASE_REQ,
+      model: "kimi-k2.7-code",
+      messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+    });
+    assert.deepEqual(first.content[0], {
+      type: "chat_reasoning",
+      reasoningContent: "opaque reasoning state",
+    });
+    assert.equal(first.usage.cachedInputTokens, 80);
+
+    const call = first.content.find((b) => b.type === "tool_use");
+    assert.ok(call && call.type === "tool_use");
+    await p.chat({
+      ...BASE_REQ,
+      model: "kimi-k2.7-code",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "go" }] },
+        { role: "assistant", content: first.content },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: call.id, content: "out" }],
+        },
+      ],
+    });
+    const replayed = captured[1].messages[2];
+    assert.equal(replayed.role, "assistant");
+    assert.equal(replayed.reasoning_content, "opaque reasoning state");
+    assert.equal(replayed.content, null);
+    assert.equal(replayed.tool_calls[0].id, "call_1");
+  });
+});
+
+test("registry: Kimi K3 routes directly through Moonshot and normalizes every effort tier to max", () => {
+  const route = getModel("kimi-k3");
+  assert.equal(route.provider_model_id, "kimi-k3");
+  assert.equal(route.base_url, "https://api.moonshot.ai/v1");
+  assert.equal(route.base_url_env, "MOONSHOT_BASE_URL");
+  assert.equal(route.api_key_env, "MOONSHOT_API_KEY");
+
+  for (const tier of ["low", "medium", "high", "xhigh"] as const) {
+    const model = getModel("kimi-k3");
+    setReasoningEffort(model, tier);
+    assert.equal(model.reasoning_effort, tier, "result metadata keeps the requested generic tier");
+    assert.equal(nativeReasoningEffortOf(model), "max", "the wire value uses benchmark max");
+  }
+});
+
 test("reasoning effort mapped to each provider's native control; omitted = nothing sent", async () => {
   const eff: ChatRequest = {
     ...BASE_REQ,
@@ -365,7 +438,7 @@ test("costOf: cached reads/writes billed at cached rates; exact provider cost wi
   assert.equal(costOf(model, { inputTokens: 123, outputTokens: 456, costUsd: 0.42 }), 0.42);
 });
 
-test("fetchJson: retries 429 (retry-after) and 500, then succeeds", async () => {
+test("fetchJson: retries explicit 429/529 rejections, then succeeds", async () => {
   let hits = 0;
   const server = http.createServer((_req, res) => {
     hits += 1;
@@ -375,8 +448,8 @@ test("fetchJson: retries 429 (retry-after) and 500, then succeeds", async () => 
       return;
     }
     if (hits === 2) {
-      res.writeHead(500);
-      res.end("oops");
+      res.writeHead(529);
+      res.end("overloaded");
       return;
     }
     res.writeHead(200, { "content-type": "application/json" });
@@ -388,6 +461,26 @@ test("fetchJson: retries 429 (retry-after) and 500, then succeeds", async () => 
     const json = await fetchJson("test", `http://127.0.0.1:${port}/x`, {}, {});
     assert.deepEqual(json, { ok: true });
     assert.equal(hits, 3);
+  } finally {
+    server.close();
+  }
+});
+
+test("fetchJson: ambiguous 5xx responses are not replayed", async () => {
+  let hits = 0;
+  const server = http.createServer((_req, res) => {
+    hits += 1;
+    res.writeHead(504);
+    res.end("upstream timeout");
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as any).port;
+  try {
+    await assert.rejects(
+      () => fetchJson("test", `http://127.0.0.1:${port}/x`, {}, {}),
+      (e: unknown) => e instanceof ProviderHttpError && e.status === 504,
+    );
+    assert.equal(hits, 1, "an ambiguous upstream outcome must not be retried");
   } finally {
     server.close();
   }
@@ -410,6 +503,69 @@ test("fetchJson: non-retryable 400 throws immediately", async () => {
     assert.equal(hits, 1, "400 must not be retried");
   } finally {
     server.close();
+  }
+});
+
+test("fetchJson: transport failures are not replayed when the request outcome is unknown", async () => {
+  let hits = 0;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    hits += 1;
+    throw new TypeError("fetch failed");
+  }) as any;
+  try {
+    await assert.rejects(
+      () => fetchJson("test", "https://example.invalid", {}, {}, 1000, 5),
+      (e: unknown) =>
+        e instanceof ProviderTransportError &&
+        /not retried.*duplicate provider work or charges/.test(e.message) &&
+        e.cause instanceof TypeError,
+    );
+    assert.equal(hits, 1, "an ambiguous POST outcome must never be retried automatically");
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("fetchJson: retries transient errors embedded in HTTP 200 bodies", async () => {
+  let hits = 0;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    hits += 1;
+    const body =
+      hits === 1
+        ? { error: { type: "server_error", message: "try again" } }
+        : { ok: true };
+    return new Response(JSON.stringify(body), { status: 200 });
+  }) as any;
+  try {
+    assert.deepEqual(await fetchJson("test", "https://example.invalid", {}, {}, 1000, 2), {
+      ok: true,
+    });
+    assert.equal(hits, 2);
+  } finally {
+    globalThis.fetch = orig;
+  }
+});
+
+test("fetchJson: terminal errors embedded in HTTP 200 bodies fail immediately", async () => {
+  let hits = 0;
+  const orig = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    hits += 1;
+    return new Response(
+      JSON.stringify({ error: { type: "invalid_request_error", message: "bad input" } }),
+      { status: 200 },
+    );
+  }) as any;
+  try {
+    await assert.rejects(
+      () => fetchJson("test", "https://example.invalid", {}, {}),
+      (e: unknown) => e instanceof ProviderHttpError && e.status === 400,
+    );
+    assert.equal(hits, 1);
+  } finally {
+    globalThis.fetch = orig;
   }
 });
 
@@ -512,7 +668,7 @@ test("registry: model ids and names carry no credential or billing metadata", ()
   assert.throws(() => getModel("gpt-5.5-oauth"), /unknown model id/);
 });
 
-test("isTerminalHttpError: fail fast on hard limits, retry transient ones", () => {
+test("isTerminalHttpError: only bounded rate-limit and overload rejections are retryable", () => {
   // Non-retryable statuses (e.g. context-length-exceeded) — throw at once.
   assert.equal(isTerminalHttpError(400, null, "context_length_exceeded"), true);
   assert.equal(isTerminalHttpError(401, null, "unauthorized"), true);
@@ -523,5 +679,7 @@ test("isTerminalHttpError: fail fast on hard limits, retry transient ones", () =
   assert.equal(isTerminalHttpError(429, "3600", "slow down"), true);
   // Transient per-minute rate limit — SHOULD still retry (not terminal).
   assert.equal(isTerminalHttpError(429, "20", "Rate limit reached, try again in 20s"), false);
-  assert.equal(isTerminalHttpError(503, null, "service unavailable"), false);
+  assert.equal(isTerminalHttpError(529, null, "overloaded"), false);
+  // A generic upstream failure has an ambiguous completion/billing outcome.
+  assert.equal(isTerminalHttpError(503, null, "service unavailable"), true);
 });
