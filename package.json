@@ -22,6 +22,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "prepack": "npm run build",
     "test": "tsx --test test/*.test.ts",
     "fetch-three": "bash scripts/fetch-three.sh",
     "wb": "tsx src/cli.ts"
